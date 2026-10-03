@@ -1,0 +1,2 @@
+io.github.abhisheksharma.ratelimiter.autoconfigure.RateLimiterAutoConfiguration
+io.github.abhisheksharma.ratelimiter.autoconfigure.RateLimiterWebAutoConfiguration

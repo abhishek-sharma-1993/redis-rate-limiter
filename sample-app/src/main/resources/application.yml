@@ -1,0 +1,46 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: rate-limiter-sample
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Keep these tight: a rate limiter that waits seconds for Redis IS the outage.
+      timeout: 50ms          # command timeout (sync path)
+      connect-timeout: 200ms
+      lettuce:
+        pool:
+          enabled: false     # one multiplexed Lettuce connection is faster than a pool for EVALSHA
+      # Redis Cluster:
+      # cluster:
+      #   nodes: redis-1:6379,redis-2:6379,redis-3:6379
+      # Redis Sentinel:
+      # sentinel:
+      #   master: mymaster
+      #   nodes: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+
+ratelimiter:
+  enabled: true
+  key-prefix: rl:sample
+  fallback: LOCAL            # LOCAL | ALLOW | DENY
+  async-timeout: 50ms
+  local:
+    ratio: 0.34              # ~1/3 of the global limit per pod while Redis is down (3 pods)
+    max-keys: 100000
+  deny-cache:
+    enabled: true
+  circuit-breaker:
+    failure-threshold: 5
+    open-duration: 5s
+  web:
+    headers: true
+    trust-forwarded-for: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus

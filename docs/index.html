@@ -1,0 +1,952 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>A rate limiter that refuses to take your API down | Abhishek Sharma</title>
+<meta name="description" content="How to build a distributed token-bucket rate limiter with Redis, Lua and Spring Boot that stays correct across pods, costs one round trip, and keeps enforcing limits when Redis is down.">
+<meta name="author" content="Abhishek Sharma">
+<meta property="og:type" content="article">
+<meta property="og:title" content="A rate limiter that refuses to take your API down">
+<meta property="og:description" content="Redis + Lua token bucket for Spring Boot: atomic across pods, one round trip, survives Redis failure. Interactive diagrams inside.">
+<meta property="og:url" content="https://abhishek-sharma-1993.github.io/redis-rate-limiter/">
+<meta property="og:image" content="https://abhishek-sharma-1993.github.io/redis-rate-limiter/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="627">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪣</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Serif:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F3F6FA; --paper:#FFFFFF; --ink:#0F1B2D; --ink-2:#3A4659; --muted:#5E6A7D; --line:#D9E0EA; --line-2:#E8EDF4;
+  --amber:#D99A0B; --amber-bg:#FFF4D6; --amber-ink:#8A5A00;
+  --teal:#0E8F80; --teal-bg:#DDF5F1; --teal-ink:#06594F;
+  --red:#D23B2E; --red-bg:#FDE4E1; --red-ink:#9B2117;
+  --blue:#2F5BEA; --blue-bg:#E3EAFE; --blue-ink:#1D3BA8;
+  --violet:#6B4FD8; --violet-bg:#ECE7FF; --violet-ink:#4630A3;
+  --code-bg:#0F1B2D; --code-ink:#E4E9F2;
+  --serif:"IBM Plex Serif", Georgia, "Times New Roman", serif;
+  --sans:"IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --col:680px; --wide:960px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0B1220; --paper:#111A2B; --ink:#E7ECF4; --ink-2:#C3CCDA; --muted:#93A0B4; --line:#25324A; --line-2:#1B2638;
+    --amber:#F2B536; --amber-bg:#3A2D0E; --amber-ink:#F6CF7A;
+    --teal:#2CC2AF; --teal-bg:#0F3330; --teal-ink:#8BE5D8;
+    --red:#F0605A; --red-bg:#3B1716; --red-ink:#F7A7A2;
+    --blue:#6E8DFF; --blue-bg:#18264D; --blue-ink:#AFC0FF;
+    --violet:#A08BFF; --violet-bg:#271E4D; --violet-ink:#CCC0FF;
+    --code-bg:#070D18; --code-ink:#E4E9F2;
+  }
+}
+:root[data-theme="dark"]{
+    --bg:#0B1220; --paper:#111A2B; --ink:#E7ECF4; --ink-2:#C3CCDA; --muted:#93A0B4; --line:#25324A; --line-2:#1B2638;
+    --amber:#F2B536; --amber-bg:#3A2D0E; --amber-ink:#F6CF7A;
+    --teal:#2CC2AF; --teal-bg:#0F3330; --teal-ink:#8BE5D8;
+    --red:#F0605A; --red-bg:#3B1716; --red-ink:#F7A7A2;
+    --blue:#6E8DFF; --blue-bg:#18264D; --blue-ink:#AFC0FF;
+    --violet:#A08BFF; --violet-bg:#271E4D; --violet-ink:#CCC0FF;
+    --code-bg:#070D18; --code-ink:#E4E9F2;
+}
+*{box-sizing:border-box}
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:calc(env(safe-area-inset-top,0px) + 24px);scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 18px/1.7 var(--sans);text-rendering:optimizeLegibility}
+a{color:var(--blue-ink);text-decoration-thickness:1px;text-underline-offset:3px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:3px solid var(--blue);outline-offset:3px;border-radius:4px}
+.progress{position:fixed;top:0;left:0;height:3px;width:0;background:var(--amber);z-index:50;margin-top:env(safe-area-inset-top,0px)}
+
+/* hero */
+.hero{background:var(--paper);border-bottom:1px solid var(--line)}
+.hero-in{max-width:1260px;margin:0 auto;padding:72px 24px 56px;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:56px;align-items:center}
+.kicker{font:500 15px/1.4 var(--sans);color:var(--teal-ink);margin:0 0 18px}
+h1{font:600 clamp(36px,5vw,58px)/1.06 var(--serif);letter-spacing:-.02em;margin:0 0 22px;text-wrap:balance}
+.dek{font-size:20px;line-height:1.6;color:var(--ink-2);margin:0 0 28px;max-width:34em}
+.byline{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;font-size:15px;color:var(--muted)}
+.byline strong{color:var(--ink);font-weight:600}
+.btn{display:inline-flex;align-items:center;gap:8px;font:500 15px/1 var(--sans);padding:12px 16px;border-radius:10px;border:1px solid var(--line);background:var(--paper);color:var(--ink);text-decoration:none;cursor:pointer}
+.btn:hover{border-color:var(--ink-2)}
+.btn-primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn-primary:hover{opacity:.9}
+.hero-cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}
+
+/* simulator */
+.sim{background:var(--bg);border:1px solid var(--line);border-radius:18px;padding:22px 22px 18px}
+.sim-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:4px 12px;margin-bottom:6px}
+.sim-title{font:600 16px/1.3 var(--sans);margin:0}
+.sim-cfg{font:400 13px/1.3 var(--mono);color:var(--muted)}
+.sim svg{width:100%;height:auto;display:block}
+.sim-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0 14px}
+.stat{background:var(--paper);border:1px solid var(--line-2);border-radius:10px;padding:8px 10px}
+.stat b{display:block;font:600 22px/1.2 var(--mono)}
+.stat span{display:block;font-size:12.5px;line-height:1.3;color:var(--muted)}
+.stat.ok b{color:var(--teal)} .stat.no b{color:var(--red)}
+.sim-ctrl{display:flex;flex-wrap:wrap;gap:8px}
+.sim-ctrl .btn{padding:10px 13px;font-size:14px}
+.sim-ctrl .btn[aria-pressed="true"]{background:var(--amber-bg);border-color:var(--amber);color:var(--amber-ink)}
+.sim-log{list-style:none;margin:12px 0 0;padding:0;font:400 13px/1.7 var(--mono);color:var(--muted);min-height:5.1em}
+.sim-log li{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sim-log .ok{color:var(--teal)} .sim-log .no{color:var(--red)}
+.chip{font:600 13px var(--mono)}
+.coin{fill:var(--amber);stroke:var(--amber-ink);stroke-width:1.5}
+.flyer{transition:transform .45s cubic-bezier(.3,.7,.2,1),opacity .45s}
+
+/* layout */
+.wrap{max-width:1260px;margin:0 auto;padding:0 24px;display:grid;grid-template-columns:190px minmax(0,1fr);gap:56px}
+.toc{position:sticky;top:32px;align-self:start;padding-top:64px;font-size:14px}
+.toc p{font-weight:600;margin:0 0 10px;color:var(--ink)}
+.toc ol{list-style:none;margin:0;padding:0;border-left:2px solid var(--line)}
+.toc a{display:block;padding:5px 0 5px 14px;margin-left:-2px;border-left:2px solid transparent;color:var(--muted);text-decoration:none;line-height:1.4}
+.toc a:hover{color:var(--ink)}
+.toc a.on{color:var(--ink);border-left-color:var(--amber);font-weight:500}
+article{padding:56px 0 40px;min-width:0}
+article>section{margin:0 0 72px}
+article>section>*{max-width:var(--col)}
+article>section>figure,article>section>pre,article>section>.facts{max-width:var(--wide)}
+h2{font:600 32px/1.2 var(--serif);letter-spacing:-.01em;margin:0 0 18px;text-wrap:balance}
+h3{font:600 20px/1.35 var(--sans);margin:34px 0 10px}
+p{margin:0 0 18px}
+.lead{font-size:20px;color:var(--ink-2)}
+ul.clean{padding-left:1.1em;margin:0 0 18px} ul.clean li{margin:0 0 8px}
+code{font:400 .86em var(--mono);background:var(--line-2);padding:2px 6px;border-radius:5px}
+figure{margin:28px 0 30px;max-width:var(--wide)}
+.figbox{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:22px;overflow-x:auto}
+.figbox svg{display:block;width:100%;height:auto;min-width:640px}
+figcaption{font-size:14.5px;line-height:1.55;color:var(--muted);margin-top:12px;max-width:var(--col)}
+.callout{border-left:3px solid var(--amber);background:var(--amber-bg);color:var(--ink);padding:16px 20px;border-radius:0 12px 12px 0;margin:24px 0}
+.callout p:last-child{margin:0}
+.tldr{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:22px 26px;margin-bottom:56px;max-width:var(--col)}
+.tldr h2{font:600 18px/1.3 var(--sans);margin:0 0 10px}
+.tldr ul{margin:0;padding-left:1.1em} .tldr li{margin:0 0 6px}
+
+/* table */
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--paper);margin:22px 0}
+table{border-collapse:collapse;width:100%;font-size:15.5px;min-width:600px}
+th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line-2);vertical-align:top}
+th{font-weight:600;color:var(--ink);background:var(--bg)}
+tr:last-child td{border-bottom:0}
+tr.pick td{background:var(--teal-bg)}
+.good{color:var(--teal-ink);font-weight:500}.bad{color:var(--red-ink);font-weight:500}.meh{color:var(--amber-ink);font-weight:500}
+
+/* code */
+pre{background:var(--code-bg);color:var(--code-ink);border-radius:14px;padding:20px 22px;overflow-x:auto;font:400 14.5px/1.65 var(--mono);margin:22px 0;max-width:var(--wide)}
+pre code{background:none;padding:0;font:inherit;color:inherit}
+.c{color:#7F8DA6}.k{color:#FF9E8F}.s{color:#9FE0B8}.f{color:#8FB6FF}.n{color:#FFD27A}
+
+/* facts grid */
+.facts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:24px 0;max-width:var(--wide)}
+.fact{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+.fact h3{margin:0 0 8px;font-size:18px}
+.fact p{margin:0;font-size:16.5px;line-height:1.6;color:var(--ink-2)}
+.fact .tag{display:inline-block;font:500 13px/1 var(--sans);padding:5px 8px;border-radius:6px;margin-bottom:12px}
+.tag.t-amber{background:var(--amber-bg);color:var(--amber-ink)}.tag.t-teal{background:var(--teal-bg);color:var(--teal-ink)}
+.tag.t-blue{background:var(--blue-bg);color:var(--blue-ink)}.tag.t-violet{background:var(--violet-bg);color:var(--violet-ink)}
+
+/* q&a */
+details{background:var(--paper);border:1px solid var(--line);border-radius:12px;margin:10px 0;padding:0 18px}
+summary{cursor:pointer;font-weight:500;padding:15px 0;list-style:none;display:flex;justify-content:space-between;gap:16px}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"+";font:400 22px/1 var(--mono);color:var(--muted)}
+details[open] summary::after{content:"−"}
+details>div{padding:0 0 16px;color:var(--ink-2);font-size:16.5px}
+
+/* end */
+.end{background:var(--ink);color:var(--paper);border-radius:20px;padding:40px;max-width:var(--wide);margin:0 0 64px}
+.end h2{color:var(--paper)}
+.end p{color:var(--paper);opacity:.85}
+.end .btn{background:var(--paper);color:var(--ink);border-color:var(--paper)}
+.end .btn.ghost{background:transparent;color:var(--paper);border-color:rgba(255,255,255,.35)}
+footer{border-top:1px solid var(--line);padding:28px 24px 48px;text-align:center;font-size:14px;color:var(--muted)}
+.theme-toggle{position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:40;width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:var(--paper);color:var(--ink);cursor:pointer;font-size:18px}
+
+/* svg diagram tokens */
+.d-text{fill:var(--ink);font:500 14px var(--sans)}
+.d-sub{fill:var(--muted);font:400 12.5px var(--sans)}
+.d-mono{fill:var(--ink-2);font:400 12px var(--mono)}
+.d-head{fill:var(--ink);font:600 15px var(--sans)}
+.d-zone{fill:var(--bg);stroke:var(--line);stroke-width:1.2}
+.d-box{fill:var(--paper);stroke:var(--line);stroke-width:1.4}
+.d-blue{fill:var(--blue-bg);stroke:var(--blue);stroke-width:1.6}
+.d-teal{fill:var(--teal-bg);stroke:var(--teal);stroke-width:1.6}
+.d-red{fill:var(--red-bg);stroke:var(--red);stroke-width:1.6}
+.d-amber{fill:var(--amber-bg);stroke:var(--amber);stroke-width:1.6}
+.d-violet{fill:var(--violet-bg);stroke:var(--violet);stroke-width:1.6}
+.d-strong{stroke-width:2.6}
+.d-q{fill:var(--paper);stroke:var(--ink-2);stroke-width:1.4;stroke-dasharray:5 4}
+.l-ink{stroke:var(--ink-2);stroke-width:1.6;fill:none}
+.l-blue{stroke:var(--blue);stroke-width:2;fill:none}
+.l-teal{stroke:var(--teal);stroke-width:2;fill:none}
+.l-red{stroke:var(--red);stroke-width:2;fill:none;stroke-dasharray:6 5}
+.l-violet{stroke:var(--violet);stroke-width:1.6;fill:none;stroke-dasharray:4 4}
+.l-dash{stroke:var(--muted);stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+.m-ink{fill:var(--ink-2)}.m-blue{fill:var(--blue)}.m-teal{fill:var(--teal)}.m-red{fill:var(--red)}.m-violet{fill:var(--violet)}.m-muted{fill:var(--muted)}
+.lbl-teal{fill:var(--teal-ink);font:600 12.5px var(--sans)}
+.lbl-red{fill:var(--red-ink);font:600 12.5px var(--sans)}
+.lbl-blue{fill:var(--blue-ink);font:600 12.5px var(--sans)}
+.lbl-muted{fill:var(--muted);font:500 12.5px var(--sans)}
+
+@media (max-width:1060px){
+  .wrap{grid-template-columns:1fr;gap:0}
+  .toc{display:none}
+}
+@media (max-width:880px){
+  .hero-in{grid-template-columns:1fr;gap:36px;padding:48px 20px 40px}
+  .facts{grid-template-columns:1fr}
+  body{font-size:17px}
+  h2{font-size:27px}
+  .end{padding:28px 22px}
+  .wrap{padding:0 20px}
+}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  .flyer{transition:none}
+}
+</style>
+</head>
+<body>
+<div class="progress" id="progress" aria-hidden="true"></div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ar-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="m-ink"/></marker>
+    <marker id="ar-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="m-blue"/></marker>
+    <marker id="ar-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="m-teal"/></marker>
+    <marker id="ar-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="m-red"/></marker>
+    <marker id="ar-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="m-violet"/></marker>
+    <marker id="ar-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="m-muted"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <div class="hero-in">
+    <div>
+      <p class="kicker">System design, built and benchmarked</p>
+      <h1>A rate limiter that refuses to take your API down</h1>
+      <p class="dek">How I built a distributed token-bucket limiter on Redis and Lua for Spring Boot. It stays correct across every pod, costs one network round trip per check, and keeps enforcing limits even when Redis is gone.</p>
+      <div class="byline">
+        <span>By <strong>Abhishek Sharma</strong>, Staff Software Engineer</span>
+        <span>October 2026</span>
+        <span>12 min read</span>
+      </div>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="https://github.com/abhishek-sharma-1993/redis-rate-limiter" target="_blank" rel="noopener">
+          <svg width="18" height="18" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          View the code on GitHub</a>
+        <a class="btn" href="#architecture">Jump to the architecture</a>
+      </div>
+    </div>
+
+    <div class="sim" id="sim">
+      <div class="sim-head">
+        <p class="sim-title">Try it: a live token bucket</p>
+        <span class="sim-cfg">capacity 10, refill 2/s</span>
+      </div>
+      <svg viewBox="0 0 420 236" role="img" aria-label="Token bucket simulator. Coins are tokens. Each request takes one coin; with no coins left the request is rejected with HTTP 429.">
+        <text x="20" y="44" class="d-sub">requests</text>
+        <line x1="20" y1="70" x2="128" y2="70" class="l-dash"/>
+        <text x="210" y="22" text-anchor="middle" class="d-sub">+2 tokens every second</text>
+        <path d="M210 30 v26" class="l-ink" marker-end="url(#ar-ink)"/>
+        <path d="M128 70 L292 70 L272 222 L148 222 Z" fill="var(--paper)" stroke="var(--ink-2)" stroke-width="2" stroke-linejoin="round"/>
+        <g id="coins"></g>
+        <text x="330" y="44" class="d-sub">responses</text>
+        <line x1="300" y1="130" x2="410" y2="130" class="l-dash"/>
+        <g id="fly"></g>
+      </svg>
+      <div class="sim-stats" aria-live="polite">
+        <div class="stat"><b id="sTokens">10.0</b><span>tokens in bucket</span></div>
+        <div class="stat ok"><b id="sOk">0</b><span>allowed (200)</span></div>
+        <div class="stat no"><b id="sNo">0</b><span>rejected (429)</span></div>
+      </div>
+      <div class="sim-ctrl">
+        <button class="btn" id="bOne" type="button">Send 1 request</button>
+        <button class="btn" id="bBurst" type="button">Send a burst of 15</button>
+        <button class="btn" id="bAuto" type="button" aria-pressed="false">Steady 4 req/s</button>
+        <button class="btn" id="bReset" type="button">Reset</button>
+      </div>
+      <ul class="sim-log" id="sLog" aria-label="Recent responses"></ul>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+<nav class="toc" aria-label="Contents">
+  <p>Contents</p>
+  <ol>
+    <li><a href="#why">Why rate limit at all</a></li>
+    <li><a href="#algorithm">Picking the algorithm</a></li>
+    <li><a href="#race">The race that breaks naive limiters</a></li>
+    <li><a href="#lua">The Lua script</a></li>
+    <li><a href="#details">Four production details</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#request">Life of a request</a></li>
+    <li><a href="#failure">When Redis dies</a></li>
+    <li><a href="#denycache">The deny cache</a></li>
+    <li><a href="#scale">Scaling out</a></li>
+    <li><a href="#bench">Benchmarks</a></li>
+    <li><a href="#tradeoffs">Trade-offs</a></li>
+    <li><a href="#interview">Interview cheat sheet</a></li>
+  </ol>
+</nav>
+
+<article>
+  <aside class="tldr" aria-labelledby="tldr-h">
+    <h2 id="tldr-h">The short version</h2>
+    <ul>
+      <li>Token bucket, because burst size and steady rate are two separate, easy-to-explain knobs.</li>
+      <li>One Lua script per check makes read-refill-consume atomic in Redis, so two pods can never spend the same token.</li>
+      <li>Redis's clock, not the pods' clocks, decides how many tokens have refilled.</li>
+      <li>A deny cache, a circuit breaker and a local fallback mean a sick Redis costs the API almost nothing.</li>
+      <li>It ships as a Spring Boot starter: add one dependency and one annotation.</li>
+    </ul>
+  </aside>
+  <section id="why">
+    <h2>Why rate limit at all</h2>
+    <p class="lead">Every public API eventually meets a client that sends more than you planned for. Sometimes it is an attacker. More often it is a well-meaning batch job with a retry loop.</p>
+    <p>A rate limiter is the bouncer at the door. It protects the databases and downstream services behind your API, it keeps one noisy tenant from starving everyone else, and it puts a ceiling on what a runaway client can cost you.</p>
+    <p>The hard part is not the algorithm. It is doing this <em>across many pods</em>, on <em>every single request</em>, without adding latency, and without turning the limiter itself into the thing that takes production down. That last requirement shaped almost every decision below.</p>
+  </section>
+
+  <section id="algorithm">
+    <h2>Picking the algorithm</h2>
+    <p>There are five classic options. They differ in how they treat bursts and how much state they keep per caller.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Algorithm</th><th>Bursts</th><th>State per key</th><th>Catch</th></tr></thead>
+        <tbody>
+          <tr><td>Fixed window counter</td><td class="bad">Up to 2× at window edges</td><td>1 counter</td><td>A client can spend a full window at 0:59 and again at 1:00.</td></tr>
+          <tr><td>Sliding window log</td><td class="good">Exact</td><td>Every timestamp</td><td>Memory grows with traffic.</td></tr>
+          <tr><td>Sliding window counter</td><td class="meh">Approximate</td><td>2 counters</td><td>Cheap, but an estimate.</td></tr>
+          <tr><td>Leaky bucket</td><td class="meh">Smoothed away</td><td>Queue or 1 value</td><td>Great for shaping, but adds delay instead of a fast no.</td></tr>
+          <tr class="pick"><td><strong>Token bucket</strong></td><td class="good">Explicit: capacity</td><td>2 numbers</td><td>Burst and steady rate are separate knobs anyone can reason about.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Token bucket is also what the big public APIs use. Stripe describes a <a href="https://stripe.com/blog/rate-limiters" target="_blank" rel="noopener">token bucket per user, backed by Redis</a>, and AWS documents that <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html" target="_blank" rel="noopener">API Gateway throttles with a token bucket</a>, where "burst" is the bucket size and "rate" is the refill speed.</p>
+    <p>The model is simple: a bucket holds up to <code>capacity</code> tokens and refills at <code>rate</code> tokens per second. Each request takes one token (or more, for expensive calls). No token, no entry. Play with the bucket at the top of the page to feel it: fire a burst of 15 into a full bucket and 10 get through; after that, the refill rate decides.</p>
+  </section>
+
+  <section id="race">
+    <h2>The race that breaks naive limiters</h2>
+    <p>The first version most of us write reads the token count, does the math in Java, and writes it back. On one server that works. On two pods it quietly fails.</p>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 900 360" role="img" aria-labelledby="race-t race-d">
+          <title id="race-t">Race condition versus atomic Lua script</title>
+          <desc id="race-d">Left: two pods both read one token and both admit a request. Right: with a Lua script, Redis runs the two checks one after the other and only one request is admitted.</desc>
+          <!-- left panel -->
+          <rect x="0" y="0" width="430" height="360" rx="14" class="d-zone"/>
+          <text x="20" y="32" class="d-head">Read, then write</text>
+          <text x="20" y="52" class="d-sub">two round trips, nothing stops interleaving</text>
+          <rect x="25" y="72" width="90" height="32" rx="8" class="d-violet"/><text x="70" y="93" text-anchor="middle" class="d-text">Pod A</text>
+          <rect x="170" y="72" width="90" height="32" rx="8" class="d-teal"/><text x="215" y="93" text-anchor="middle" class="d-text">Redis</text>
+          <rect x="315" y="72" width="90" height="32" rx="8" class="d-violet"/><text x="360" y="93" text-anchor="middle" class="d-text">Pod B</text>
+          <line x1="70" y1="104" x2="70" y2="278" class="l-dash"/><line x1="215" y1="104" x2="215" y2="278" class="l-dash"/><line x1="360" y1="104" x2="360" y2="278" class="l-dash"/>
+          <path d="M70 135 H213" class="l-ink" marker-end="url(#ar-ink)"/><text x="142" y="128" text-anchor="middle" class="d-sub">GET tokens</text>
+          <path d="M215 160 H72" class="l-dash" marker-end="url(#ar-muted)"/><text x="142" y="154" text-anchor="middle" class="lbl-muted">1</text>
+          <path d="M360 190 H217" class="l-ink" marker-end="url(#ar-ink)"/><text x="288" y="183" text-anchor="middle" class="d-sub">GET tokens</text>
+          <path d="M215 215 H358" class="l-dash" marker-end="url(#ar-muted)"/><text x="288" y="209" text-anchor="middle" class="lbl-muted">1</text>
+          <path d="M70 248 H213" class="l-ink" marker-end="url(#ar-ink)"/><text x="142" y="241" text-anchor="middle" class="d-sub">SET 0, allow</text>
+          <path d="M360 274 H217" class="l-ink" marker-end="url(#ar-ink)"/><text x="288" y="267" text-anchor="middle" class="d-sub">SET 0, allow</text>
+          <rect x="20" y="308" width="390" height="40" rx="10" class="d-red"/>
+          <text x="215" y="333" text-anchor="middle" class="lbl-red">1 token, 2 requests admitted</text>
+          <!-- right panel -->
+          <rect x="470" y="0" width="430" height="360" rx="14" class="d-zone"/>
+          <text x="490" y="32" class="d-head">One Lua script</text>
+          <text x="490" y="52" class="d-sub">one round trip, Redis runs it start to finish</text>
+          <rect x="495" y="72" width="90" height="32" rx="8" class="d-violet"/><text x="540" y="93" text-anchor="middle" class="d-text">Pod A</text>
+          <rect x="640" y="72" width="90" height="32" rx="8" class="d-teal"/><text x="685" y="93" text-anchor="middle" class="d-text">Redis</text>
+          <rect x="785" y="72" width="90" height="32" rx="8" class="d-violet"/><text x="830" y="93" text-anchor="middle" class="d-text">Pod B</text>
+          <line x1="540" y1="104" x2="540" y2="278" class="l-dash"/><line x1="685" y1="104" x2="685" y2="278" class="l-dash"/><line x1="830" y1="104" x2="830" y2="278" class="l-dash"/>
+          <path d="M540 135 H677" class="l-blue" marker-end="url(#ar-blue)"/><text x="610" y="128" text-anchor="middle" class="lbl-blue">EVALSHA</text>
+          <rect x="679" y="135" width="12" height="40" rx="3" fill="var(--blue)"/>
+          <path d="M679 175 H542" class="l-teal" stroke-dasharray="6 5" marker-end="url(#ar-teal)"/><text x="610" y="169" text-anchor="middle" class="lbl-teal">allowed, 0 left</text>
+          <path d="M830 200 H693" class="l-blue" marker-end="url(#ar-blue)"/><text x="760" y="193" text-anchor="middle" class="lbl-blue">EVALSHA</text>
+          <rect x="679" y="200" width="12" height="40" rx="3" fill="var(--blue)"/>
+          <path d="M691 240 H828" class="l-red" marker-end="url(#ar-red)"/><text x="760" y="234" text-anchor="middle" class="lbl-red">denied</text><text x="760" y="258" text-anchor="middle" class="lbl-red">retry in 500 ms</text>
+          <text x="685" y="296" text-anchor="middle" class="d-sub">Redis runs one script at a time</text>
+          <rect x="490" y="308" width="390" height="40" rx="10" class="d-teal"/>
+          <text x="685" y="333" text-anchor="middle" class="lbl-teal">exactly 1 request admitted</text>
+        </svg>
+      </div>
+      <figcaption>Left: both pods read "1 token" before either writes, so both admit. Right: Redis executes a script as a single command, so the second check sees the first one's result.</figcaption>
+    </figure>
+    <p>You could fix this with <code>WATCH/MULTI/EXEC</code>, but optimistic locking retries pile up on exactly the keys that matter most: the hot ones. A distributed lock adds two more round trips and its own failure modes.</p>
+    <p>A Lua script solves it in one move. Redis treats a script like a single command and runs it to completion before anything else, so read, refill and consume happen together. I verified this with 2,000 concurrent requests against a 1,000-token bucket: exactly 1,000 were admitted.</p>
+  </section>
+
+  <section id="lua">
+    <h2>The Lua script</h2>
+    <p>This is the whole algorithm. It runs inside Redis, it is O(1), and the client sends only the script's 40-character SHA1 hash via <code>EVALSHA</code>, not the script itself.</p>
+<pre><code><span class="c">-- KEYS[1] = bucket key, ARGV = capacity, refill rate (tokens/s), permits</span>
+<span class="k">local</span> capacity  = <span class="f">tonumber</span>(ARGV[<span class="n">1</span>])
+<span class="k">local</span> rate      = <span class="f">tonumber</span>(ARGV[<span class="n">2</span>])
+<span class="k">local</span> requested = <span class="f">tonumber</span>(ARGV[<span class="n">3</span>])
+
+<span class="c">-- One clock for every pod: Redis's own</span>
+<span class="k">local</span> t   = <span class="f">redis.call</span>(<span class="s">'TIME'</span>)
+<span class="k">local</span> now = <span class="f">tonumber</span>(t[<span class="n">1</span>]) * <span class="n">1000000</span> + <span class="f">tonumber</span>(t[<span class="n">2</span>])   <span class="c">-- microseconds</span>
+
+<span class="k">local</span> state  = <span class="f">redis.call</span>(<span class="s">'HMGET'</span>, KEYS[<span class="n">1</span>], <span class="s">'t'</span>, <span class="s">'ts'</span>)
+<span class="k">local</span> tokens = <span class="f">tonumber</span>(state[<span class="n">1</span>])
+<span class="k">local</span> ts     = <span class="f">tonumber</span>(state[<span class="n">2</span>])
+<span class="k">if</span> tokens == <span class="k">nil or</span> ts == <span class="k">nil then</span> tokens = capacity; ts = now <span class="k">end</span>  <span class="c">-- new bucket starts full</span>
+
+<span class="c">-- Refill for the time that passed, never above capacity</span>
+<span class="k">local</span> elapsed = <span class="f">math.max</span>(<span class="n">0</span>, now - ts)
+tokens = <span class="f">math.min</span>(capacity, tokens + (elapsed * rate) / <span class="n">1000000</span>)
+
+<span class="k">if</span> requested &lt;= tokens <span class="k">then</span>
+  tokens = tokens - requested
+  <span class="f">redis.call</span>(<span class="s">'HSET'</span>, KEYS[<span class="n">1</span>], <span class="s">'t'</span>, tokens, <span class="s">'ts'</span>, now)
+  <span class="f">redis.call</span>(<span class="s">'PEXPIRE'</span>, KEYS[<span class="n">1</span>], <span class="f">math.ceil</span>((capacity * <span class="n">1000</span>) / rate) + <span class="n">1000</span>)
+  <span class="k">return</span> { <span class="s">'1'</span>, <span class="f">tostring</span>(<span class="f">math.floor</span>(tokens)), <span class="s">'0'</span> }          <span class="c">-- allowed</span>
+<span class="k">elseif</span> requested &gt; capacity <span class="k">then</span>
+  <span class="k">return</span> { <span class="s">'0'</span>, <span class="f">tostring</span>(<span class="f">math.floor</span>(tokens)), <span class="s">'-1'</span> }         <span class="c">-- can never fit</span>
+<span class="k">else</span>                                                       <span class="c">-- denied: no write at all</span>
+  <span class="k">return</span> { <span class="s">'0'</span>, <span class="f">tostring</span>(<span class="f">math.floor</span>(tokens)),
+           <span class="f">tostring</span>(<span class="f">math.ceil</span>(((requested - tokens) * <span class="n">1000</span>) / rate)) }  <span class="c">-- retry after, ms</span>
+<span class="k">end</span></code></pre>
+    <p>The repository version is the same logic with a single return statement. Each reply carries three things the caller needs: allowed or not, tokens left, and how long to wait.</p>
+  </section>
+
+  <section id="details">
+    <h2>Four details that matter in production</h2>
+    <p>Each is a small decision in the script, and each removes a whole class of production bugs.</p>
+    <div class="facts">
+      <div class="fact">
+        <span class="tag t-blue">Clock</span>
+        <h3>Redis decides what time it is</h3>
+        <p>If pods used their own clocks, a pod running 2 seconds fast would mint free tokens. Using <code>TIME</code> inside the script gives every pod the same "now". This is safe on replicas because, since Redis 5, scripts replicate their resulting writes rather than being re-run.</p>
+      </div>
+      <div class="fact">
+        <span class="tag t-teal">Writes</span>
+        <h3>A denial writes nothing</h3>
+        <p>The stored tokens and timestamp project to exactly the same future whether or not we save the refill. So a rejected request skips <code>HSET</code> entirely. A flood of abusive traffic causes zero writes and zero replication traffic.</p>
+      </div>
+      <div class="fact">
+        <span class="tag t-amber">Memory</span>
+        <h3>Buckets clean themselves up</h3>
+        <p>Each key expires after "time to refill completely, plus one second". An expired bucket behaves exactly like a full one, so expiry never changes a decision. One bucket is a small hash of about 100 bytes.</p>
+      </div>
+      <div class="fact">
+        <span class="tag t-violet">Sharding</span>
+        <h3>One key per bucket</h3>
+        <p>The script touches a single key, so it works on Redis Cluster with no hash-tag tricks. Buckets spread evenly over all 16,384 hash slots, and throughput grows as you add shards.</p>
+      </div>
+    </div>
+  </section>
+  <section id="architecture">
+    <h2>Architecture</h2>
+    <p>The limiter is not a separate service. It is a library embedded in every app pod, so there is no extra network hop and nothing new to deploy or scale. Redis is the only shared component, and it runs replicated.</p>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 960 640" role="img" aria-labelledby="arch-t arch-d">
+          <title id="arch-t">Architecture of the distributed rate limiter</title>
+          <desc id="arch-d">Clients reach stateless app pods through a load balancer. Inside each pod, an interceptor or the RateLimiter bean calls the engine, which checks a deny cache and a circuit breaker before sending one EVALSHA to a Redis Cluster. On failure it uses a local token bucket.</desc>
+
+          <!-- clients + LB -->
+          <rect x="16" y="226" width="134" height="56" rx="10" class="d-box"/>
+          <text x="83" y="259" text-anchor="middle" class="d-text">Clients</text>
+          <path d="M83 282 V318" class="l-ink" marker-end="url(#ar-ink)"/>
+          <rect x="16" y="320" width="134" height="56" rx="10" class="d-amber"/>
+          <text x="83" y="353" text-anchor="middle" class="d-text">Load balancer</text>
+
+          <!-- pod stack -->
+          <rect x="214" y="64" width="470" height="548" rx="16" class="d-zone" opacity=".55"/>
+          <rect x="202" y="52" width="470" height="548" rx="16" class="d-zone" opacity=".8"/>
+          <rect x="190" y="40" width="470" height="548" rx="16" class="d-zone"/>
+          <text x="210" y="68" class="d-head">App pod</text>
+          <text x="276" y="68" class="d-sub">×N, stateless, same code</text>
+
+          <path d="M150 348 H172 V118 H208" class="l-ink" marker-end="url(#ar-ink)"/>
+          <text x="160" y="232" class="lbl-muted" transform="rotate(-90 160 232)" text-anchor="middle">HTTP</text>
+
+          <rect x="210" y="90" width="200" height="56" rx="10" class="d-violet"/>
+          <text x="310" y="113" text-anchor="middle" class="d-text">@RateLimit</text>
+          <text x="310" y="132" text-anchor="middle" class="d-sub">MVC interceptor</text>
+          <rect x="430" y="90" width="210" height="56" rx="10" class="d-violet"/>
+          <text x="535" y="113" text-anchor="middle" class="d-text">RateLimiter bean</text>
+          <text x="535" y="132" text-anchor="middle" class="d-sub">Kafka, gRPC, scheduled jobs</text>
+
+          <path d="M310 146 V174" class="l-ink" marker-end="url(#ar-ink)"/>
+          <rect x="210" y="176" width="200" height="50" rx="10" class="d-amber"/>
+          <text x="310" y="197" text-anchor="middle" class="d-text">Key resolver</text>
+          <text x="310" y="215" text-anchor="middle" class="d-sub">SpEL: #ip, #pathVars, headers</text>
+
+          <path d="M310 226 V252" class="l-ink" marker-end="url(#ar-ink)"/>
+          <path d="M535 146 V252" class="l-ink" marker-end="url(#ar-ink)"/>
+          <rect x="210" y="254" width="430" height="60" rx="12" class="d-blue d-strong"/>
+          <text x="425" y="279" text-anchor="middle" class="d-head">RedisTokenBucketRateLimiter</text>
+          <text x="425" y="299" text-anchor="middle" class="d-sub">runs every check, never throws to the caller</text>
+
+          <path d="M275 314 V342" class="l-ink" marker-end="url(#ar-ink)"/>
+          <path d="M425 314 V342" class="l-ink" marker-end="url(#ar-ink)"/>
+          <path d="M575 314 V342" class="l-violet" marker-end="url(#ar-violet)"/>
+          <rect x="210" y="344" width="130" height="64" rx="10" class="d-teal"/>
+          <text x="275" y="371" text-anchor="middle" class="d-text">Deny cache</text>
+          <text x="275" y="390" text-anchor="middle" class="d-sub">known denials, 0 RTT</text>
+          <rect x="360" y="344" width="130" height="64" rx="10" class="d-red"/>
+          <text x="425" y="371" text-anchor="middle" class="d-text">Circuit breaker</text>
+          <text x="425" y="390" text-anchor="middle" class="d-sub">skips a sick Redis</text>
+          <rect x="510" y="344" width="130" height="64" rx="10" class="d-box"/>
+          <text x="575" y="371" text-anchor="middle" class="d-text">Metrics</text>
+          <text x="575" y="390" text-anchor="middle" class="d-sub">Micrometer</text>
+
+          <path d="M440 408 V422 H535 V436" class="l-teal" marker-end="url(#ar-teal)"/>
+          <text x="488" y="418" text-anchor="middle" class="lbl-teal">closed</text>
+          <path d="M410 408 V422 H310 V436" class="l-red" marker-end="url(#ar-red)"/>
+          <text x="362" y="418" text-anchor="middle" class="lbl-red">open</text>
+
+          <rect x="210" y="438" width="200" height="64" rx="10" class="d-amber"/>
+          <text x="310" y="465" text-anchor="middle" class="d-text">Local token bucket</text>
+          <text x="310" y="484" text-anchor="middle" class="d-sub">per pod, ratio × limit</text>
+          <rect x="430" y="438" width="210" height="64" rx="10" class="d-blue"/>
+          <text x="535" y="465" text-anchor="middle" class="d-text">Lettuce client</text>
+          <text x="535" y="484" text-anchor="middle" class="d-sub">one multiplexed connection</text>
+          <path d="M430 470 H412" class="l-red" marker-end="url(#ar-red)"/>
+
+          <rect x="210" y="522" width="430" height="46" rx="10" class="d-box"/>
+          <text x="425" y="550" text-anchor="middle" class="d-sub">Redis error, timeout or open circuit: LOCAL (default), ALLOW or DENY</text>
+
+          <!-- redis -->
+          <rect x="690" y="40" width="254" height="548" rx="16" class="d-zone"/>
+          <text x="710" y="68" class="d-head">Redis Cluster</text>
+          <rect x="710" y="88" width="214" height="52" rx="10" class="d-teal"/>
+          <text x="817" y="110" text-anchor="middle" class="d-text">Primary A</text>
+          <text x="817" y="128" text-anchor="middle" class="d-sub">slots 0 – 8191</text>
+          <path d="M817 140 V156" class="l-dash" marker-end="url(#ar-muted)"/>
+          <rect x="710" y="158" width="214" height="36" rx="10" class="d-box"/>
+          <text x="817" y="181" text-anchor="middle" class="d-sub">Replica A</text>
+          <rect x="710" y="210" width="214" height="52" rx="10" class="d-teal"/>
+          <text x="817" y="232" text-anchor="middle" class="d-text">Primary B</text>
+          <text x="817" y="250" text-anchor="middle" class="d-sub">slots 8192 – 16383</text>
+          <path d="M817 262 V278" class="l-dash" marker-end="url(#ar-muted)"/>
+          <rect x="710" y="280" width="214" height="36" rx="10" class="d-box"/>
+          <text x="817" y="303" text-anchor="middle" class="d-sub">Replica B</text>
+
+          <rect x="710" y="340" width="214" height="120" rx="12" class="d-blue d-strong"/>
+          <text x="817" y="366" text-anchor="middle" class="d-head">token_bucket.lua</text>
+          <text x="817" y="390" text-anchor="middle" class="d-sub">atomic, on the key's primary</text>
+          <text x="817" y="410" text-anchor="middle" class="d-sub">clock = Redis TIME</text>
+          <text x="817" y="430" text-anchor="middle" class="d-sub">writes only when it allows</text>
+          <text x="817" y="450" text-anchor="middle" class="d-sub">O(1): HMGET, HSET, PEXPIRE</text>
+
+          <rect x="710" y="478" width="214" height="90" rx="12" class="d-amber"/>
+          <text x="817" y="502" text-anchor="middle" class="d-text">One hash per bucket</text>
+          <text x="817" y="525" text-anchor="middle" class="d-mono">rl:name:caller</text>
+          <text x="817" y="543" text-anchor="middle" class="d-mono">{ t: tokens, ts: µs }</text>
+          <text x="817" y="561" text-anchor="middle" class="d-sub">~100 bytes, self-expiring</text>
+
+          <path d="M640 470 H668 V400 H706" class="l-blue" marker-start="url(#ar-blue)" marker-end="url(#ar-blue)"/>
+          <text x="681" y="436" class="lbl-blue" transform="rotate(-90 681 436)" text-anchor="middle">EVALSHA</text>
+
+          <!-- legend -->
+          <line x1="190" y1="620" x2="220" y2="620" class="l-teal"/><text x="228" y="624" class="d-sub">healthy path</text>
+          <line x1="330" y1="620" x2="360" y2="620" class="l-red"/><text x="368" y="624" class="d-sub">degraded path</text>
+          <line x1="482" y1="620" x2="512" y2="620" class="l-blue"/><text x="520" y="624" class="d-sub">network round trip</text>
+          <line x1="660" y1="620" x2="690" y2="620" class="l-dash"/><text x="698" y="624" class="d-sub">async replication</text>
+        </svg>
+      </div>
+      <figcaption>Everything in the pod box is the library. Only the blue arrow crosses the network, once per check, and only when the deny cache and circuit breaker let it.</figcaption>
+    </figure>
+    <h3>What each piece does</h3>
+    <ul class="clean">
+      <li><strong>Entry points.</strong> Put <code>@RateLimit(capacity = 10, refillPerSecond = 5)</code> on a controller method, or inject the <code>RateLimiter</code> bean anywhere: Kafka consumers, gRPC handlers, scheduled jobs.</li>
+      <li><strong>Key resolver.</strong> Decides who is being limited. <code>key = "#pathVars['merchantId']"</code> gives each merchant its own bucket. Expressions run in a restricted SpEL context that cannot load classes or touch beans.</li>
+      <li><strong>Engine.</strong> Coordinates every check in a fixed order, cheapest first, and wraps everything so the caller always gets a decision, never an exception.</li>
+      <li><strong>Lettuce.</strong> Lettuce connections are thread-safe and multiplex many in-flight commands over one socket, which suits short commands like <code>EVALSHA</code> better than a connection pool.</li>
+    </ul>
+    <p>Using it takes one dependency and one annotation:</p>
+<pre><code><span class="f">@RateLimit</span>(name = <span class="s">"merchant-orders"</span>, capacity = <span class="n">100</span>, refillPerSecond = <span class="n">50</span>,
+           key = <span class="s">"#pathVars['merchantId']"</span>)
+<span class="f">@GetMapping</span>(<span class="s">"/api/merchants/{merchantId}/orders"</span>)
+<span class="k">public</span> Orders <span class="f">orders</span>(<span class="f">@PathVariable</span> String merchantId) { ... }
+
+<span class="c">// or anywhere else</span>
+RateLimitDecision d = rateLimiter.<span class="f">tryAcquire</span>(<span class="s">"export:"</span> + userId, BucketConfig.<span class="f">perMinute</span>(<span class="n">30</span>));</code></pre>
+  </section>
+
+  <section id="request">
+    <h2>Life of a request</h2>
+    <p>Every check walks the same path. The cheap local answers come first, and the network is the last resort, not the default.</p>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 760 590" role="img" aria-labelledby="flow-t flow-d">
+          <title id="flow-t">Decision flow for one rate limit check</title>
+          <desc id="flow-d">Check the deny cache, then the circuit breaker, then call the Lua script. Errors and an open circuit go to the fallback policy. The script returns allowed with remaining tokens, or denied with a retry time.</desc>
+          <rect x="230" y="16" width="220" height="48" rx="24" class="d-violet"/>
+          <text x="340" y="45" text-anchor="middle" class="d-text">Request for key K, P permits</text>
+          <path d="M340 64 V98" class="l-ink" marker-end="url(#ar-ink)"/>
+
+          <rect x="210" y="100" width="260" height="56" rx="10" class="d-q"/>
+          <text x="340" y="133" text-anchor="middle" class="d-text">Denied recently? (deny cache)</text>
+          <path d="M470 128 H526" class="l-red" marker-end="url(#ar-red)"/><text x="498" y="120" text-anchor="middle" class="lbl-red">yes</text>
+          <rect x="528" y="100" width="216" height="56" rx="10" class="d-red"/>
+          <text x="636" y="124" text-anchor="middle" class="d-text">429 from memory</text>
+          <text x="636" y="143" text-anchor="middle" class="d-sub">no network call</text>
+          <path d="M340 156 V194" class="l-ink" marker-end="url(#ar-ink)"/><text x="350" y="180" class="lbl-muted">no</text>
+
+          <rect x="210" y="196" width="260" height="56" rx="10" class="d-q"/>
+          <text x="340" y="229" text-anchor="middle" class="d-text">Circuit breaker closed?</text>
+          <path d="M470 224 H526" class="l-red" marker-end="url(#ar-red)"/><text x="498" y="216" text-anchor="middle" class="lbl-red">no</text>
+          <rect x="528" y="196" width="216" height="56" rx="10" class="d-amber"/>
+          <text x="636" y="220" text-anchor="middle" class="d-text">Fallback policy</text>
+          <text x="636" y="239" text-anchor="middle" class="d-sub">LOCAL, ALLOW or DENY</text>
+          <path d="M340 252 V290" class="l-ink" marker-end="url(#ar-ink)"/><text x="350" y="276" class="lbl-muted">yes</text>
+
+          <rect x="210" y="292" width="260" height="56" rx="10" class="d-blue d-strong"/>
+          <text x="340" y="316" text-anchor="middle" class="d-text">EVALSHA token_bucket.lua</text>
+          <text x="340" y="335" text-anchor="middle" class="d-sub">one round trip to Redis</text>
+          <path d="M340 348 V386" class="l-blue" marker-end="url(#ar-blue)"/>
+
+          <rect x="210" y="388" width="260" height="56" rx="10" class="d-q"/>
+          <text x="340" y="421" text-anchor="middle" class="d-text">Reply within the timeout?</text>
+          <path d="M470 416 H636 V256" class="l-red" marker-end="url(#ar-red)"/><text x="560" y="408" text-anchor="middle" class="lbl-red">no: count a failure</text>
+          <path d="M340 444 V482" class="l-ink" marker-end="url(#ar-ink)"/><text x="350" y="468" class="lbl-muted">yes</text>
+
+          <rect x="210" y="484" width="260" height="56" rx="10" class="d-q"/>
+          <text x="340" y="517" text-anchor="middle" class="d-text">Enough tokens for P?</text>
+          <path d="M210 512 H174" class="l-teal" marker-end="url(#ar-teal)"/><text x="192" y="504" text-anchor="middle" class="lbl-teal">yes</text>
+          <rect x="16" y="484" width="156" height="72" rx="10" class="d-teal"/>
+          <text x="94" y="510" text-anchor="middle" class="d-text">200, continue</text>
+          <text x="94" y="529" text-anchor="middle" class="d-sub">X-RateLimit-Remaining</text>
+          <text x="94" y="546" text-anchor="middle" class="d-sub">header set</text>
+          <path d="M470 512 H526" class="l-red" marker-end="url(#ar-red)"/><text x="498" y="504" text-anchor="middle" class="lbl-red">no</text>
+          <rect x="528" y="484" width="216" height="72" rx="10" class="d-red"/>
+          <text x="636" y="510" text-anchor="middle" class="d-text">429 + Retry-After</text>
+          <text x="636" y="529" text-anchor="middle" class="d-sub">denial remembered in</text>
+          <text x="636" y="546" text-anchor="middle" class="d-sub">the deny cache</text>
+          <path d="M744 520 H754 V128 H748" class="l-dash" marker-end="url(#ar-muted)"/>
+        </svg>
+      </div>
+      <figcaption>The happy path costs one round trip. The deny-cache and open-circuit exits cost none. The dotted line on the right is the feedback loop: every denial from Redis seeds the deny cache.</figcaption>
+    </figure>
+  </section>
+  <section id="failure">
+    <h2>When Redis dies</h2>
+    <p class="lead">A rate limiter that fails closed takes your API down with it. One that waits on a dead Redis adds a timeout to every request. Both are outages you caused.</p>
+    <p>So the library has three layers of defence, from "Redis is fine" to "Redis is gone":</p>
+    <ul class="clean">
+      <li><strong>Replication.</strong> Redis Cluster or Sentinel promotes a replica when a primary fails. Many incidents end here.</li>
+      <li><strong>Tight timeouts.</strong> 50 ms per command and 200 ms to connect. A slow Redis can cost a request at most that, and only until the circuit breaker trips.</li>
+      <li><strong>A circuit breaker</strong> that stops calling Redis entirely once it is clearly unhealthy.</li>
+    </ul>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 760 300" role="img" aria-labelledby="cb-t cb-d">
+          <title id="cb-t">Circuit breaker states</title>
+          <desc id="cb-d">Closed moves to open after five consecutive failures. Open moves to half-open after five seconds. Half-open returns to closed if the single probe succeeds, or back to open if it fails.</desc>
+          <rect x="40" y="110" width="180" height="74" rx="14" class="d-teal"/>
+          <text x="130" y="141" text-anchor="middle" class="d-head">Closed</text>
+          <text x="130" y="164" text-anchor="middle" class="d-sub">every call goes to Redis</text>
+          <rect x="290" y="110" width="180" height="74" rx="14" class="d-red"/>
+          <text x="380" y="141" text-anchor="middle" class="d-head">Open</text>
+          <text x="380" y="164" text-anchor="middle" class="d-sub">Redis skipped, ~0 ms</text>
+          <rect x="540" y="110" width="180" height="74" rx="14" class="d-amber"/>
+          <text x="630" y="141" text-anchor="middle" class="d-head">Half-open</text>
+          <text x="630" y="164" text-anchor="middle" class="d-sub">exactly one probe call</text>
+          <path d="M190 110 C 230 46, 290 46, 326 106" class="l-red" style="stroke-dasharray:none" marker-end="url(#ar-red)"/>
+          <text x="258" y="44" text-anchor="middle" class="lbl-red">5 failures in a row</text>
+          <path d="M440 110 C 480 46, 540 46, 576 106" class="l-ink" marker-end="url(#ar-ink)"/>
+          <text x="508" y="44" text-anchor="middle" class="lbl-muted">after 5 seconds</text>
+          <path d="M540 147 H474" class="l-red" marker-end="url(#ar-red)"/>
+          <text x="507" y="206" text-anchor="middle" class="lbl-red">probe fails</text>
+          <path d="M630 184 C 600 290, 160 290, 130 190" class="l-teal" marker-end="url(#ar-teal)"/>
+          <text x="380" y="242" text-anchor="middle" class="lbl-teal">probe succeeds</text>
+        </svg>
+      </div>
+      <figcaption>A compare-and-set on the state guarantees that only one thread becomes the probe when the open period ends. Everyone else keeps using the fallback until it reports back.</figcaption>
+    </figure>
+    <p>While the circuit is open, or when a call errors out, a configurable policy decides what happens:</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Policy</th><th>Behaviour</th><th>Good for</th></tr></thead>
+        <tbody>
+          <tr class="pick"><td><strong>LOCAL</strong> (default)</td><td>Each pod enforces <code>ratio × limit</code> with an in-memory bucket. With 3 pods, a ratio of about 0.34 keeps the fleet near the global limit.</td><td>Most APIs. Still protected, still up.</td></tr>
+          <tr><td><strong>ALLOW</strong></td><td>Let everything through.</td><td>Read-heavy endpoints where availability wins.</td></tr>
+          <tr><td><strong>DENY</strong></td><td>Reject everything.</td><td>Login, OTP and payment endpoints, where letting abuse through is worse than refusing service.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><p><strong>The honest trade-off:</strong> during an outage the LOCAL limit is approximate, because pods are not coordinating. If the pod count changes mid-outage, the fleet total drifts. I chose an API that stays up and roughly protected over one that is perfectly accurate and down.</p></div>
+  </section>
+
+  <section id="denycache">
+    <h2>The deny cache: answering without asking</h2>
+    <p>This is my favourite piece, because it is both a big win and provably safe.</p>
+    <p>When Redis says <em>"caller X needs another 800 ms before one token exists"</em>, that is a hard lower bound. Tokens only arrive at the refill rate, and other pods can only take tokens, never add them. So for the next 800 ms, any request from X for at least that many permits is guaranteed to be rejected. The pod can say no from memory.</p>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 760 230" role="img" aria-labelledby="dc-t dc-d">
+          <title id="dc-t">Deny cache timeline</title>
+          <desc id="dc-d">A request at time t is denied by Redis with retry in 800 milliseconds. Requests during the next 800 milliseconds are rejected locally without contacting Redis. The first request after the window goes to Redis again.</desc>
+          <text x="24" y="44" class="d-text">Redis</text>
+          <line x1="90" y1="40" x2="720" y2="40" class="l-dash"/>
+          <text x="24" y="174" class="d-text">Pod</text>
+          <rect x="132" y="62" width="452" height="128" rx="10" class="d-amber" opacity=".75"/>
+          <text x="358" y="84" text-anchor="middle" class="d-text">deny cache answers locally: 0 network calls</text>
+          <line x1="90" y1="170" x2="726" y2="170" class="l-ink" marker-end="url(#ar-ink)"/>
+          <text x="736" y="174" class="d-sub">time</text>
+          <path d="M120 162 V48" class="l-blue" marker-end="url(#ar-blue)"/>
+          <circle cx="120" cy="170" r="7" fill="var(--blue)"/>
+                    <rect x="140" y="98" width="196" height="26" rx="6" class="d-red"/>
+          <text x="238" y="116" text-anchor="middle" class="lbl-red">denied, retry in 800 ms</text>
+          <circle cx="220" cy="170" r="6" fill="var(--red)"/><circle cx="280" cy="170" r="6" fill="var(--red)"/>
+          <circle cx="330" cy="170" r="6" fill="var(--red)"/><circle cx="400" cy="170" r="6" fill="var(--red)"/>
+          <circle cx="455" cy="170" r="6" fill="var(--red)"/><circle cx="520" cy="170" r="6" fill="var(--red)"/>
+          <text x="370" y="150" text-anchor="middle" class="lbl-red">429, 429, 429 ...</text>
+          <path d="M620 162 V48" class="l-blue" marker-end="url(#ar-blue)"/>
+          <circle cx="620" cy="170" r="7" fill="var(--blue)"/>
+          <rect x="630" y="98" width="100" height="26" rx="6" class="d-teal"/>
+          <text x="680" y="116" text-anchor="middle" class="lbl-teal">allowed</text>
+          <text x="120" y="208" text-anchor="middle" class="d-sub">t</text>
+          <text x="584" y="208" text-anchor="middle" class="d-sub">t + 800 ms</text>
+        </svg>
+      </div>
+      <figcaption>An abusive client hammering one key costs Redis roughly one call per refill window instead of one call per request.</figcaption>
+    </figure>
+    <p>Two details keep it correct. A smaller request still goes to Redis, because it might fit where the larger one did not. And entries expire on their own, with the cache bounded in size. The guarantee holds as long as the bucket's configuration does not change during that short window.</p>
+  </section>
+
+  <section id="scale">
+    <h2>Scaling out</h2>
+    <p>Redis Cluster splits keys into 16,384 hash slots by <code>CRC16(key) mod 16384</code> and spreads the slots over primaries. Because each bucket is exactly one key, buckets scatter evenly. Even neighbouring IDs land on different shards:</p>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 760 250" role="img" aria-labelledby="sl-t sl-d">
+          <title id="sl-t">Bucket keys mapped to Redis Cluster hash slots</title>
+          <desc id="sl-d">Three example keys hash to slots 600, 8560 and 12625, which belong to primaries A, B and C in a three-primary cluster.</desc>
+          <rect x="40" y="40" width="170" height="34" rx="8" class="d-box"/><text x="125" y="62" text-anchor="middle" class="d-mono">rl:export:user-7</text>
+          <rect x="230" y="40" width="245" height="34" rx="8" class="d-box"/><text x="352" y="62" text-anchor="middle" class="d-mono">rl:merchant-orders:merchant-43</text>
+          <rect x="495" y="40" width="245" height="34" rx="8" class="d-box"/><text x="617" y="62" text-anchor="middle" class="d-mono">rl:merchant-orders:merchant-42</text>
+          <path d="M125 74 C 125 100, 65 100, 65 128" class="l-ink" marker-end="url(#ar-ink)"/>
+          <path d="M352 74 C 352 100, 395 100, 395 128" class="l-ink" marker-end="url(#ar-ink)"/>
+          <path d="M617 74 C 617 100, 564 100, 564 128" class="l-ink" marker-end="url(#ar-ink)"/>
+          <text x="132" y="112" class="d-sub">slot 600</text>
+          <text x="404" y="112" class="d-sub">slot 8560</text>
+          <text x="624" y="112" class="d-sub">slot 12625</text>
+          <rect x="40" y="130" width="226.7" height="40" rx="0" class="d-teal"/>
+          <rect x="266.7" y="130" width="226.6" height="40" class="d-blue"/>
+          <rect x="493.3" y="130" width="226.7" height="40" class="d-violet"/>
+          <text x="153" y="155" text-anchor="middle" class="d-text">Primary A</text>
+          <text x="380" y="155" text-anchor="middle" class="d-text">Primary B</text>
+          <text x="607" y="155" text-anchor="middle" class="d-text">Primary C</text>
+          <text x="40" y="192" class="d-sub">0</text>
+          <text x="266" y="192" text-anchor="middle" class="d-sub">5461</text>
+          <text x="493" y="192" text-anchor="middle" class="d-sub">10923</text>
+          <text x="720" y="192" text-anchor="end" class="d-sub">16383</text>
+          <text x="380" y="228" text-anchor="middle" class="d-sub">default slot split for a 3-primary cluster</text>
+        </svg>
+      </div>
+      <figcaption>Slot numbers computed with Redis's CRC16 and cross-checked with <code>CLUSTER KEYSLOT</code> on a real cluster-mode Redis.</figcaption>
+    </figure>
+    <h3>Back-of-the-envelope capacity</h3>
+    <ul class="clean">
+      <li><strong>Memory:</strong> about 100 bytes per active bucket, so 10 million active callers fit in roughly 1 GB.</li>
+      <li><strong>Throughput:</strong> each check is one short O(1) script. Total capacity grows roughly linearly with the number of primaries, and the deny cache removes most abusive traffic before it reaches Redis.</li>
+      <li><strong>The real limit is a hot key.</strong> One tenant at enormous traffic is pinned to one shard. The deny cache absorbs its rejected requests; for its allowed ones, the next steps are token leasing (pods pre-fetch small batches of tokens) or splitting that tenant into several sub-buckets.</li>
+    </ul>
+  </section>
+
+  <section id="bench">
+    <h2>Benchmarks</h2>
+    <p>I benchmarked the Lua script on its own with <code>redis-benchmark</code>, 50 concurrent clients, on a deliberately small machine: a single vCPU shared by Redis and the load generator. Treat these as a floor, not a ceiling.</p>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 760 270" role="img" aria-labelledby="bn-t bn-d">
+          <title id="bn-t">Throughput of the rate limit script</title>
+          <desc id="bn-d">Plain GET 166 thousand operations per second, p99 0.42 ms. Script across 100 thousand keys 62 thousand, p99 1.46 ms. Script on one hot key, allowed, 62 thousand, p99 1.40 ms. Script on one hot key, denied, 75 thousand, p99 1.20 ms.</desc>
+          <text x="20" y="30" class="d-sub">operations per second (p99 latency), 1 vCPU, 50 clients</text>
+          <text x="250" y="68" text-anchor="end" class="d-text">Plain GET (baseline)</text>
+          <rect x="262" y="50" width="398" height="28" rx="6" fill="var(--line)"/>
+          <text x="668" y="69" class="d-text">166k</text><text x="668" y="88" class="d-sub">0.42 ms</text>
+          <text x="250" y="118" text-anchor="end" class="d-text">Script, 100k keys, allowed</text>
+          <rect x="262" y="100" width="149" height="28" rx="6" fill="var(--blue)"/>
+          <text x="419" y="119" class="d-text">62k</text><text x="453" y="119" class="d-sub">1.46 ms</text>
+          <text x="250" y="168" text-anchor="end" class="d-text">Script, one hot key, allowed</text>
+          <rect x="262" y="150" width="149" height="28" rx="6" fill="var(--amber)"/>
+          <text x="419" y="169" class="d-text">62k</text><text x="453" y="169" class="d-sub">1.40 ms</text>
+          <text x="250" y="218" text-anchor="end" class="d-text">Script, one hot key, denied</text>
+          <rect x="262" y="200" width="180" height="28" rx="6" fill="var(--teal)"/>
+          <text x="450" y="219" class="d-text">75k</text><text x="484" y="219" class="d-sub">1.20 ms</text>
+          <line x1="262" y1="40" x2="262" y2="240" class="l-ink" stroke-width="1"/>
+        </svg>
+      </div>
+      <figcaption>Redis 7, loopback, client and server on the same core. Repeated runs on this machine varied by up to about 30%, so read the bars relative to each other, not as absolute numbers. Real deployments add network round-trip time but gain dedicated CPU. The repository includes this script, a JMH suite and a k6 load test so you can reproduce it on your own hardware.</figcaption>
+    </figure>
+    <p>What the numbers say: the script costs roughly 2.5 to 3 times a plain <code>GET</code>, which is the price of an atomic read-refill-write. p99 stays under 1.5 ms even with all 50 clients fighting over a single key. And the denied path is measurably cheaper than the allowed one, because a denial skips the write and its replication entirely.</p>
+    <p>Correctness matters more than speed, so the integration suite also fires 3,200 requests from 64 threads across 4 simulated pods at one 500-token bucket, and asserts that exactly 500 are admitted.</p>
+  </section>
+
+  <section id="tradeoffs">
+    <h2>Trade-offs I accepted</h2>
+    <ul class="clean">
+      <li><strong>One network hop per allowed request.</strong> Pre-fetching tokens locally would remove it but trades precision for speed. I kept exactness and put leasing on the roadmap.</li>
+      <li><strong>Brief over-admission after a failover.</strong> Redis replication is asynchronous, so a promoted replica may have missed the last few writes and think buckets are fuller than they are. For a rate limiter, letting a few extra requests through is the right side to err on.</li>
+      <li><strong>Approximate limits while Redis is down.</strong> Covered above: available and roughly protected beats exact and offline.</li>
+      <li><strong>Library, not a service.</strong> No extra hop and no new deployment, but every service must pull the dependency. A gateway is still the right place for coarse edge limits; this handles fine-grained, business-aware ones, including non-HTTP traffic.</li>
+    </ul>
+  </section>
+
+  <section id="interview">
+    <h2>Interview cheat sheet</h2>
+    <p>If you are preparing for a system design round, these are the follow-ups this design invites. Tap to reveal.</p>
+    <details><summary>Why not do the token math in Java and store the result?</summary><div>Read-compute-write from two pods interleaves, so both can spend the same token. Making it atomic needs either optimistic locking with retries, a lock with extra round trips, or a server-side script. The script is one round trip and cannot be interleaved.</div></details>
+    <details><summary>What if a pod's clock is wrong, or Redis's clock jumps back?</summary><div>Pod clocks are never used; Redis <code>TIME</code> is the single source of time. If Redis's clock moves backwards, elapsed time is clamped to zero, so no tokens are minted.</div></details>
+    <details><summary>Is TIME inside a script safe with replication?</summary><div>Yes. Since Redis 5, scripts are replicated by their effects (the resulting writes) by default, and Redis 7 removed verbatim script replication altogether. Replicas apply the same values instead of re-running the script.</div></details>
+    <details><summary>How do you enforce two limits at once, like 10 per second and 1,000 per day?</summary><div>Check two buckets. To make it all-or-nothing, extend the script to take both keys and only consume when both have tokens. On Redis Cluster, give the keys a shared hash tag such as <code>{user-7}</code> so they live in the same slot.</div></details>
+    <details><summary>How do you change a customer's limit at runtime?</summary><div>The bucket configuration is passed on every call, so it can come from a config service. The script clamps existing tokens to the new capacity, so lowering a limit takes effect immediately.</div></details>
+    <details><summary>Where would you still use an API gateway?</summary><div>For coarse, per-IP edge protection before traffic reaches your services. This library handles limits that need business context (per merchant, weighted operations) and traffic that never passes a gateway, like Kafka consumers.</div></details>
+    <details><summary>What breaks first at very large scale?</summary><div>A single hot key, because one key lives on one shard. The deny cache absorbs its rejected traffic; token leasing or splitting that tenant across sub-buckets handles its allowed traffic.</div></details>
+  </section>
+
+  <section class="end" aria-labelledby="end-h">
+    <h2 id="end-h">The code is open source</h2>
+    <p>Spring Boot starter, the Lua script, integration tests with Testcontainers, JMH and k6 benchmarks, and a design doc. If it helps you, a star helps other engineers find it.</p>
+    <div class="hero-cta">
+      <a class="btn" href="https://github.com/abhishek-sharma-1993/redis-rate-limiter" target="_blank" rel="noopener">Star it on GitHub</a>
+      <a class="btn ghost" href="https://github.com/abhishek-sharma-1993/redis-rate-limiter/blob/main/docs/DESIGN.md" target="_blank" rel="noopener">Read the design doc</a>
+    </div>
+  </section>
+
+  <section id="refs">
+    <h3>Further reading</h3>
+    <ul class="clean">
+      <li><a href="https://stripe.com/blog/rate-limiters" target="_blank" rel="noopener">Stripe: Scaling your API with rate limiters</a></li>
+      <li><a href="https://github.blog/engineering/infrastructure/how-we-scaled-github-api-sharded-replicated-rate-limiter-redis/" target="_blank" rel="noopener">GitHub: a sharded, replicated rate limiter in Redis</a></li>
+      <li><a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html" target="_blank" rel="noopener">AWS: API Gateway request throttling</a></li>
+      <li><a href="https://redis.io/docs/latest/develop/programmability/eval-intro/" target="_blank" rel="noopener">Redis: scripting with Lua</a></li>
+    </ul>
+  </section>
+</article>
+</div>
+
+<footer>
+  Written by Abhishek Sharma. Code on <a href="https://github.com/abhishek-sharma-1993/redis-rate-limiter" target="_blank" rel="noopener">GitHub</a>, MIT licensed.
+</footer>
+<button class="theme-toggle" id="theme" type="button" aria-label="Switch between light and dark theme">◐</button>
+<script>
+(function(){
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var NS = 'http://www.w3.org/2000/svg';
+
+  /* ---------- token bucket simulator (same math as the Lua script) ---------- */
+  var CAP = 10, RATE = 2;           // tokens, tokens per second
+  var tokens = CAP, last = performance.now(), ok = 0, no = 0, auto = null;
+  var coinsG = document.getElementById('coins'), flyG = document.getElementById('fly');
+  var sTokens = document.getElementById('sTokens'), sOk = document.getElementById('sOk'), sNo = document.getElementById('sNo'), log = document.getElementById('sLog');
+  var slots = [];
+  for (var i = 0; i < CAP; i++) {
+    var row = Math.floor(i / 5), col = i % 5;
+    var c = document.createElementNS(NS, 'circle');
+    c.setAttribute('cx', 164 + col * 23); c.setAttribute('cy', 207 - row * 23); c.setAttribute('r', 11);
+    c.setAttribute('class', 'coin'); coinsG.appendChild(c); slots.push(c);
+  }
+  function refill(){
+    var now = performance.now();
+    tokens = Math.min(CAP, tokens + (now - last) / 1000 * RATE);
+    last = now;
+  }
+  function draw(){
+    for (var i = 0; i < CAP; i++) {
+      var f = Math.max(0, Math.min(1, tokens - i));
+      slots[i].style.opacity = f >= 1 ? 1 : (f > 0 ? 0.15 + 0.5 * f : 0.08);
+    }
+    sTokens.textContent = tokens.toFixed(1);
+    sOk.textContent = ok; sNo.textContent = no;
+  }
+  function addLog(cls, text){
+    var li = document.createElement('li'); li.className = cls; li.textContent = text;
+    log.insertBefore(li, log.firstChild);
+    while (log.children.length > 3) log.removeChild(log.lastChild);
+  }
+  function fly(allowed){
+    if (reduce) return;
+    var dot = document.createElementNS(NS, 'circle');
+    dot.setAttribute('cx', 24); dot.setAttribute('cy', 70); dot.setAttribute('r', 6);
+    dot.setAttribute('fill', 'var(--violet)'); dot.setAttribute('class', 'flyer');
+    flyG.appendChild(dot);
+    var chip = document.createElementNS(NS, 'text');
+    chip.setAttribute('x', 312); chip.setAttribute('y', 126); chip.setAttribute('class', 'chip flyer');
+    chip.setAttribute('fill', allowed ? 'var(--teal)' : 'var(--red)');
+    chip.textContent = allowed ? '200 OK' : '429';
+    chip.style.opacity = 0; flyG.appendChild(chip);
+    requestAnimationFrame(function(){ requestAnimationFrame(function(){
+      dot.style.transform = 'translate(186px,0)';
+      setTimeout(function(){
+        dot.style.opacity = 0;
+        chip.style.opacity = 1; chip.style.transform = 'translate(40px,0)';
+      }, 300);
+      setTimeout(function(){ chip.style.opacity = 0; }, 900);
+      setTimeout(function(){ flyG.removeChild(dot); flyG.removeChild(chip); }, 1500);
+    });});
+  }
+  function request(){
+    refill();
+    if (tokens >= 1) {
+      tokens -= 1; ok++;
+      addLog('ok', '200  allowed, ' + Math.floor(tokens) + ' left');
+      fly(true);
+    } else {
+      no++;
+      var retry = Math.ceil((1 - tokens) * 1000 / RATE);
+      addLog('no', '429  retry after ' + retry + ' ms');
+      fly(false);
+    }
+    draw();
+  }
+  document.getElementById('bOne').addEventListener('click', request);
+  document.getElementById('bBurst').addEventListener('click', function(){
+    for (var i = 0; i < 15; i++) setTimeout(request, reduce ? 0 : i * 18);
+  });
+  var bAuto = document.getElementById('bAuto');
+  bAuto.addEventListener('click', function(){
+    if (auto) { clearInterval(auto); auto = null; bAuto.setAttribute('aria-pressed','false'); }
+    else { auto = setInterval(request, 250); bAuto.setAttribute('aria-pressed','true'); }
+  });
+  document.getElementById('bReset').addEventListener('click', function(){
+    if (auto) { clearInterval(auto); auto = null; bAuto.setAttribute('aria-pressed','false'); }
+    tokens = CAP; last = performance.now(); ok = 0; no = 0; log.innerHTML = ''; draw();
+  });
+  setInterval(function(){ refill(); draw(); }, 100);
+  draw();
+
+  /* ---------- reading progress + contents highlight ---------- */
+  var bar = document.getElementById('progress');
+  function onScroll(){
+    var h = document.documentElement;
+    var p = h.scrollTop / Math.max(1, h.scrollHeight - h.clientHeight);
+    bar.style.width = (p * 100).toFixed(2) + '%';
+  }
+  document.addEventListener('scroll', onScroll, {passive:true}); onScroll();
+  var links = {}; document.querySelectorAll('.toc a').forEach(function(a){ links[a.getAttribute('href').slice(1)] = a; });
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting && links[e.target.id]) {
+          Object.keys(links).forEach(function(k){ links[k].classList.remove('on'); });
+          links[e.target.id].classList.add('on');
+        }
+      });
+    }, {rootMargin:'-20% 0px -70% 0px'});
+    Object.keys(links).forEach(function(id){ var s = document.getElementById(id); if (s) io.observe(s); });
+  }
+
+  /* ---------- theme toggle ---------- */
+  var root = document.documentElement, KEY = 'rl-article-theme';
+  try { var saved = localStorage.getItem(KEY); if (saved) root.setAttribute('data-theme', saved); } catch(e){}
+  document.getElementById('theme').addEventListener('click', function(){
+    var dark = root.getAttribute('data-theme') ? root.getAttribute('data-theme') === 'dark'
+             : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = dark ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem(KEY, next); } catch(e){}
+  });
+})();
+</script>
+</body>
+</html>
